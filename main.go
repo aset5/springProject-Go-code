@@ -1,82 +1,114 @@
 package main
 
 import (
-	"database/sql"
-	"encoding/json"
-	"github.com/gorilla/mux"
-	_ "github.com/lib/pq"
-	"log"
+	"fmt"
+	"github.com/gin-gonic/gin"
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 	"net/http"
+	"strconv"
 )
 
 type Product struct {
-	ID          int     `json:"id"`
-	Title       string  `json:"title"`
-	Description string  `json:"description"`
-	Price       float64 `json:"price"`
-	UserID      int     `json:"user_id"`
+	ID     uint    `json:"id" gorm:"primaryKey;autoIncrement"`
+	Name   string  `json:"name"`
+	Price  float64 `json:"price"`
+	UserID uint    `json:"user_id"`
 }
 
-var db *sql.DB
+var db *gorm.DB
 
-func init() {
+func initDatabase() {
+	dsn := "host=localhost user=postgres password=andaset2005 dbname=postgres port=5432 sslmode=disable TimeZone=Asia/Almaty"
 	var err error
-	db, err = sql.Open("postgres", "user=youruser password=yourpassword dbname=yourdb sslmode=disable")
+	db, err = gorm.Open(postgres.Open(dsn), &gorm.Config{
+		Logger: logger.Default.LogMode(logger.Info),
+	})
 	if err != nil {
-		log.Fatal(err)
+		panic("Failed to connect to database!")
+	}
+	err = db.AutoMigrate(&Product{})
+	if err != nil {
+		panic("Failed to migrate database!")
 	}
 }
 
-func getProducts(w http.ResponseWriter, r *http.Request) {
-	rows, err := db.Query("SELECT id, title, description, price, user_id FROM products")
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	defer rows.Close()
-
+func getProducts(c *gin.Context) {
 	var products []Product
-	for rows.Next() {
-		var p Product
-		if err := rows.Scan(&p.ID, &p.Title, &p.Description, &p.Price, &p.UserID); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		products = append(products, p)
+	db.Find(&products)
+
+	// Лог для отладки
+	for _, p := range products {
+		fmt.Printf("ID: %d | Name: %s | Price: %.2f\n", p.ID, p.Name, p.Price)
 	}
-	json.NewEncoder(w).Encode(products)
+
+	c.JSON(http.StatusOK, products)
 }
 
-func createProduct(w http.ResponseWriter, r *http.Request) {
-	var p Product
-	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+func getProduct(c *gin.Context) {
+	id, _ := strconv.Atoi(c.Param("id"))
+	var product Product
+	if result := db.First(&product, id); result.Error != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Product not found"})
 		return
 	}
-	_, err := db.Exec("INSERT INTO products (title, description, price, user_id) VALUES ($1, $2, $3, $4)", p.Title, p.Description, p.Price, p.UserID)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	w.WriteHeader(http.StatusCreated)
+	c.JSON(http.StatusOK, product)
 }
 
-func deleteProduct(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-	id := vars["id"]
-	_, err := db.Exec("DELETE FROM products WHERE id = $1", id)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+func createProduct(c *gin.Context) {
+	var product Product
+	if err := c.ShouldBindJSON(&product); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	w.WriteHeader(http.StatusOK)
+
+	if product.Name == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Name is required"})
+		return
+	}
+
+	db.Create(&product)
+	c.JSON(http.StatusCreated, product)
+}
+
+func updateProduct(c *gin.Context) {
+	id, _ := strconv.Atoi(c.Param("id"))
+	var product Product
+	if db.First(&product, id).Error != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Product not found"})
+		return
+	}
+	var input Product
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	product.Name = input.Name
+	product.Price = input.Price
+	db.Save(&product)
+	c.JSON(http.StatusOK, product)
+}
+
+func deleteProduct(c *gin.Context) {
+	id, _ := strconv.Atoi(c.Param("id"))
+	if result := db.Delete(&Product{}, id); result.RowsAffected == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Product not found"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "Product deleted"})
 }
 
 func main() {
-	r := mux.NewRouter()
-	r.HandleFunc("/products", getProducts).Methods("GET")
-	r.HandleFunc("/products", createProduct).Methods("POST")
-	r.HandleFunc("/products/{id}", deleteProduct).Methods("DELETE")
+	initDatabase()
 
-	log.Fatal(http.ListenAndServe(":8080", r))
+	router := gin.Default()
+
+	router.GET("/products", getProducts)
+	router.GET("/products/:id", getProduct)
+	router.POST("/products", createProduct)
+	router.PUT("/products/:id", updateProduct)
+	router.DELETE("/products/:id", deleteProduct)
+
+	router.Run(":8082")
 }
