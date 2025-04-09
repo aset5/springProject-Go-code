@@ -1,13 +1,16 @@
 package main
 
 import (
-	"fmt"
+	_ "fmt"
 	"github.com/gin-gonic/gin"
+	"github.com/golang-jwt/jwt/v5"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 	"net/http"
 	"strconv"
+	"strings"
+	"time"
 )
 
 type Product struct {
@@ -18,6 +21,50 @@ type Product struct {
 }
 
 var db *gorm.DB
+var jwtKey = []byte("your-secret-key-for-jwt-go-spring-compatibility")
+
+type Claims struct {
+	UserID uint `json:"userId"`
+	jwt.RegisteredClaims
+}
+
+func AuthMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		authHeader := c.GetHeader("Authorization")
+		if authHeader == "" {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Authorization header required"})
+			c.Abort()
+			return
+		}
+
+		tokenString := strings.TrimPrefix(authHeader, "Bearer ")
+		if tokenString == authHeader {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid token format"})
+			c.Abort()
+			return
+		}
+
+		token, err := jwt.ParseWithClaims(tokenString, &Claims{}, func(token *jwt.Token) (interface{}, error) {
+			return jwtKey, nil
+		})
+
+		if err != nil || !token.Valid {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid or expired token"})
+			c.Abort()
+			return
+		}
+
+		claims, ok := token.Claims.(*Claims)
+		if !ok || claims.ExpiresAt.Time.Before(time.Now()) {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Token expired"})
+			c.Abort()
+			return
+		}
+
+		c.Set("userID", claims.UserID)
+		c.Next()
+	}
+}
 
 func initDatabase() {
 	dsn := "host=localhost user=postgres password=andaset2005 dbname=postgres port=5432 sslmode=disable TimeZone=Asia/Almaty"
@@ -37,12 +84,6 @@ func initDatabase() {
 func getProducts(c *gin.Context) {
 	var products []Product
 	db.Find(&products)
-
-	// Лог для отладки
-	for _, p := range products {
-		fmt.Printf("ID: %d | Name: %s | Price: %.2f\n", p.ID, p.Name, p.Price)
-	}
-
 	c.JSON(http.StatusOK, products)
 }
 
@@ -62,6 +103,13 @@ func createProduct(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+
+	userID, exists := c.Get("userID")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "User ID not found in token"})
+		return
+	}
+	product.UserID = userID.(uint)
 
 	if product.Name == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Name is required"})
@@ -106,9 +154,14 @@ func main() {
 
 	router.GET("/products", getProducts)
 	router.GET("/products/:id", getProduct)
-	router.POST("/products", createProduct)
-	router.PUT("/products/:id", updateProduct)
-	router.DELETE("/products/:id", deleteProduct)
+
+	protected := router.Group("/")
+	protected.Use(AuthMiddleware())
+	{
+		protected.POST("/products", createProduct)
+		protected.PUT("/products/:id", updateProduct)
+		protected.DELETE("/products/:id", deleteProduct)
+	}
 
 	router.Run(":8082")
 }
